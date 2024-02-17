@@ -1,7 +1,6 @@
 //! A helper for building DBus services
 
 use std::collections::HashMap;
-use std::os::fd::{AsRawFd, RawFd};
 use std::rc::Rc;
 
 use rustbus::connection::Timeout;
@@ -17,35 +16,30 @@ pub use rustbus;
 /// Dispatches method calls to the provided callbacks and automatically provides the implementation
 /// of `org.freedesktop.DBus.Introspectable` and `org.freedesktop.DBus.Properties` interfaces.
 pub struct Service<D> {
-    conn: DuplexConn,
     root: Object<D>,
 }
 
 pub struct MethodContext<'a, D> {
     pub service: &'a mut Service<D>,
+    pub conn: &'a mut DuplexConn,
     pub state: &'a mut D,
     pub msg: &'a MarshalledMessage,
     pub object_path: &'a str,
 }
 
-impl<D> AsRawFd for Service<D> {
-    fn as_raw_fd(&self) -> RawFd {
-        self.conn.as_raw_fd()
-    }
+pub struct PropContext<'a, D> {
+    pub conn: &'a mut DuplexConn,
+    pub state: &'a mut D,
+    pub object_path: &'a str,
+    pub name: &'a str,
 }
 
 impl<D: 'static> Service<D> {
     /// Create a new service helper.
-    pub fn new(conn: DuplexConn) -> Self {
+    pub fn new() -> Self {
         Self {
-            conn,
             root: Object::new(),
         }
-    }
-
-    /// Get the underlying connection.
-    pub fn conn_mut(&mut self) -> &mut DuplexConn {
-        &mut self.conn
     }
 
     /// Get the root object.
@@ -71,12 +65,13 @@ impl<D: 'static> Service<D> {
     /// Receive messages and dispatch method calls.
     pub fn run(
         &mut self,
+        conn: &mut DuplexConn,
         state: &mut D,
         timeout: Timeout,
     ) -> Result<(), rustbus::connection::Error> {
         assert!(matches!(timeout, Timeout::Nonblock), "unimplemented");
         loop {
-            let msg = match self.conn.recv.get_next_message(Timeout::Nonblock) {
+            let msg = match conn.recv.get_next_message(Timeout::Nonblock) {
                 Ok(msg) => msg,
                 Err(rustbus::connection::Error::TimedOut) => return Ok(()),
                 Err(e) => return Err(e),
@@ -91,13 +86,14 @@ impl<D: 'static> Service<D> {
                     if let Some(cb) = get_call_handler(&self.root, &msg) {
                         cb(MethodContext {
                             service: self,
+                            conn,
                             state,
                             msg: &msg,
                             object_path: msg.dynheader.object.as_deref().unwrap(),
                         });
                     } else {
                         let mut resp = rustbus::standard_messages::unknown_method(&msg.dynheader);
-                        self.conn.send.send_message_write_all(&mut resp)?;
+                        conn.send.send_message_write_all(&mut resp)?;
                     }
                 }
                 MessageType::Reply => todo!(),
@@ -210,8 +206,8 @@ impl<D> InterfaceImp<D> {
     pub fn add_prop<T, R, W>(mut self, name: impl Into<Box<str>>, access: Access<R, W>) -> Self
     where
         T: Signature + Into<Param<'static, 'static>>,
-        R: Fn(&str, &mut D) -> T + 'static,
-        W: Fn(&str, &mut D, UnVariant) + 'static,
+        R: Fn(PropContext<D>) -> T + 'static,
+        W: Fn(PropContext<D>, UnVariant) + 'static,
     {
         let name = name.into();
         self.props.insert(
@@ -220,12 +216,11 @@ impl<D> InterfaceImp<D> {
                 name,
                 signature: T::signature(),
                 access: match access {
-                    Access::Read(_) => todo!(),
-                    Access::Write(_) => todo!(),
-                    Access::ReadWrite(r, w) => Access::ReadWrite(
-                        Box::new(move |name, state| r(name, state).into()),
-                        Box::new(move |name, state, param| w(name, state, param)),
-                    ),
+                    Access::Read(r) => Access::Read(Box::new(move |ctx| r(ctx).into())),
+                    Access::Write(w) => Access::Write(Box::new(w)),
+                    Access::ReadWrite(r, w) => {
+                        Access::ReadWrite(Box::new(move |ctx| r(ctx).into()), Box::new(w))
+                    }
                 },
             },
         );
@@ -272,8 +267,8 @@ pub struct PropertyImp<D> {
     name: Box<str>,
     signature: rustbus::signature::Type,
     access: Access<
-        Box<dyn Fn(&str, &mut D) -> Param<'static, 'static>>,
-        Box<dyn Fn(&str, &mut D, UnVariant)>,
+        Box<dyn Fn(PropContext<D>) -> Param<'static, 'static>>,
+        Box<dyn Fn(PropContext<D>, UnVariant)>,
     >,
 }
 
@@ -291,11 +286,18 @@ fn get_all_props_cb<D: 'static>(ctx: MethodContext<D>) {
     let mut props = HashMap::<&str, Variant>::new();
 
     for prop in iface.props.values() {
+        let ctx = PropContext {
+            conn: ctx.conn,
+            state: ctx.state,
+            object_path: ctx.object_path,
+            name: &prop.name,
+        };
+
         match &prop.access {
             Access::Read(_) => todo!(),
             Access::Write(_) => todo!(),
             Access::ReadWrite(get, _) => {
-                let val = get(ctx.object_path, ctx.state);
+                let val = get(ctx);
                 props.insert(
                     &prop.name,
                     Variant {
@@ -309,11 +311,7 @@ fn get_all_props_cb<D: 'static>(ctx: MethodContext<D>) {
 
     let mut resp = ctx.msg.dynheader.make_response();
     resp.body.push_param(props).unwrap();
-    ctx.service
-        .conn
-        .send
-        .send_message_write_all(&mut resp)
-        .unwrap();
+    ctx.conn.send.send_message_write_all(&mut resp).unwrap();
 }
 
 fn set_prop_cb<D: 'static>(ctx: MethodContext<D>) {
@@ -326,14 +324,21 @@ fn set_prop_cb<D: 'static>(ctx: MethodContext<D>) {
     let iface = object.interfaces.get(iface).unwrap();
 
     let prop = iface.props.get(prop).unwrap();
+
+    let pctx = PropContext {
+        conn: ctx.conn,
+        state: ctx.state,
+        object_path: ctx.object_path,
+        name: &prop.name,
+    };
+
     match &prop.access {
         Access::Read(_) => todo!(),
         Access::Write(_) => todo!(),
-        Access::ReadWrite(_, set) => set(ctx.object_path, ctx.state, value),
+        Access::ReadWrite(_, set) => set(pctx, value),
     }
 
-    ctx.service
-        .conn
+    ctx.conn
         .send
         .send_message_write_all(&mut ctx.msg.dynheader.make_response())
         .unwrap();
@@ -395,9 +400,5 @@ fn introspect_cb<D: 'static>(ctx: MethodContext<D>) {
 
     let mut resp = ctx.msg.dynheader.make_response();
     resp.body.push_param(&xml).unwrap();
-    ctx.service
-        .conn
-        .send
-        .send_message_write_all(&mut resp)
-        .unwrap();
+    ctx.conn.send.send_message_write_all(&mut resp).unwrap();
 }

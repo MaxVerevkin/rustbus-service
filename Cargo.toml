@@ -6,4 +6,5 @@ license = "MIT"
 authors = ["MaxVerevkin <maxxverrr@gmail.com>"]
 
 [dependencies]
-rustbus = "0.19"
+# rustbus = "0.19"
+rustbus = { git = "https://github.com/MaxVerevkin/rustbus", branch = "patches" }
