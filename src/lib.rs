@@ -139,9 +139,14 @@ impl<D: 'static> Object<D> {
             .add_arg::<String>("interface_name", false)
             .add_arg::<String>("property_name", false)
             .add_arg::<Variant>("value", false);
+        let props_changed_signal = SignalImp::new("PropertiesChanged")
+            .add_arg::<String>("interface_name")
+            .add_arg::<HashMap<String, Variant>>("changed_properties")
+            .add_arg::<&[String]>("invalidated_properties");
         let props_iface = InterfaceImp::new("org.freedesktop.DBus.Properties")
             .add_method(get_all_method)
-            .add_method(set_method);
+            .add_method(set_method)
+            .add_signal(props_changed_signal);
         object.add_interface(props_iface);
 
         let introspect_method =
@@ -186,6 +191,7 @@ impl<D: 'static> Object<D> {
 pub struct InterfaceImp<D> {
     name: Box<str>,
     methods: HashMap<Box<str>, MethodImp<D>>,
+    signals: HashMap<Box<str>, SignalImp>,
     props: HashMap<Box<str>, PropertyImp<D>>,
 }
 
@@ -194,12 +200,18 @@ impl<D> InterfaceImp<D> {
         Self {
             name: interface.into(),
             methods: HashMap::new(),
+            signals: HashMap::new(),
             props: HashMap::new(),
         }
     }
 
     pub fn add_method(mut self, method: MethodImp<D>) -> Self {
         self.methods.insert(method.name.clone(), method);
+        self
+    }
+
+    pub fn add_signal(mut self, signal: SignalImp) -> Self {
+        self.signals.insert(signal.name.clone(), signal);
         self
     }
 
@@ -260,6 +272,34 @@ impl<D> MethodImp<D> {
 struct MethodArgument {
     name: Box<str>,
     is_out: bool,
+    signature: rustbus::signature::Type,
+}
+
+pub struct SignalImp {
+    name: Box<str>,
+    args: Vec<SignalArgument>,
+}
+
+impl SignalImp {
+    pub fn new(name: impl Into<Box<str>>) -> Self {
+        let name = name.into();
+        SignalImp {
+            name,
+            args: Vec::new(),
+        }
+    }
+
+    pub fn add_arg<T: Signature>(mut self, name: impl Into<Box<str>>) -> Self {
+        self.args.push(SignalArgument {
+            name: name.into(),
+            signature: T::signature(),
+        });
+        self
+    }
+}
+
+struct SignalArgument {
+    name: Box<str>,
     signature: rustbus::signature::Type,
 }
 
@@ -368,6 +408,19 @@ fn introspect_cb<D: 'static>(ctx: MethodContext<D>) {
                 xml.push_str(r#""/>"#);
             }
             xml.push_str(r#"</method>"#);
+        }
+        for method in iface.signals.values() {
+            xml.push_str(r#"<signal name=""#);
+            xml.push_str(&method.name);
+            xml.push_str(r#"">"#);
+            for arg in &method.args {
+                xml.push_str(r#"<arg name=""#);
+                xml.push_str(&arg.name);
+                xml.push_str(r#"" type=""#);
+                arg.signature.to_str(&mut xml);
+                xml.push_str(r#""/>"#);
+            }
+            xml.push_str(r#"</signal>"#);
         }
         for prop in iface.props.values() {
             xml.push_str(r#"<property name=""#);
