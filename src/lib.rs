@@ -1,5 +1,7 @@
 //! A helper for building DBus services
 
+#![allow(clippy::new_without_default)]
+
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -92,8 +94,8 @@ impl<D: 'static> Service<D> {
                             object_path: msg.dynheader.object.as_deref().unwrap(),
                         });
                     } else {
-                        let mut resp = rustbus::standard_messages::unknown_method(&msg.dynheader);
-                        conn.send.send_message_write_all(&mut resp)?;
+                        let resp = rustbus::standard_messages::unknown_method(&msg.dynheader);
+                        conn.send.send_message_write_all(&resp)?;
                     }
                 }
                 MessageType::Reply => todo!(),
@@ -104,6 +106,8 @@ impl<D: 'static> Service<D> {
 }
 
 type MethodCallCb<D> = Rc<dyn Fn(MethodContext<D>)>;
+type PropGetCb<D> = Box<dyn Fn(PropContext<D>) -> Param<'static, 'static>>;
+type PropSetCb<D> = Box<dyn Fn(PropContext<D>, UnVariant)>;
 
 fn get_call_handler<D: 'static>(
     root: &Object<D>,
@@ -170,7 +174,7 @@ impl<D: 'static> Object<D> {
 
     fn get_child<'a>(&'a self, rel_path: &'_ str) -> Option<&'a Self> {
         match rel_path.split_once('/') {
-            None if rel_path == "" => Some(self),
+            None if rel_path.is_empty() => Some(self),
             None => self.children.get(rel_path),
             Some((name, rest)) => self.children.get(name).and_then(|obj| obj.get_child(rest)),
         }
@@ -178,7 +182,7 @@ impl<D: 'static> Object<D> {
 
     fn get_child_mut<'a>(&'a mut self, rel_path: &'_ str) -> Option<&'a mut Self> {
         match rel_path.split_once('/') {
-            None if rel_path == "" => Some(self),
+            None if rel_path.is_empty() => Some(self),
             None => self.children.get_mut(rel_path),
             Some((name, rest)) => self
                 .children
@@ -306,10 +310,7 @@ struct SignalArgument {
 pub struct PropertyImp<D> {
     name: Box<str>,
     signature: rustbus::signature::Type,
-    access: Access<
-        Box<dyn Fn(PropContext<D>) -> Param<'static, 'static>>,
-        Box<dyn Fn(PropContext<D>, UnVariant)>,
-    >,
+    access: Access<PropGetCb<D>, PropSetCb<D>>,
 }
 
 pub enum Access<R, W> {
@@ -351,7 +352,7 @@ fn get_all_props_cb<D: 'static>(ctx: MethodContext<D>) {
 
     let mut resp = ctx.msg.dynheader.make_response();
     resp.body.push_param(props).unwrap();
-    ctx.conn.send.send_message_write_all(&mut resp).unwrap();
+    ctx.conn.send.send_message_write_all(&resp).unwrap();
 }
 
 fn set_prop_cb<D: 'static>(ctx: MethodContext<D>) {
@@ -380,7 +381,7 @@ fn set_prop_cb<D: 'static>(ctx: MethodContext<D>) {
 
     ctx.conn
         .send
-        .send_message_write_all(&mut ctx.msg.dynheader.make_response())
+        .send_message_write_all(&ctx.msg.dynheader.make_response())
         .unwrap();
 }
 
@@ -453,5 +454,5 @@ fn introspect_cb<D: 'static>(ctx: MethodContext<D>) {
 
     let mut resp = ctx.msg.dynheader.make_response();
     resp.body.push_param(&xml).unwrap();
-    ctx.conn.send.send_message_write_all(&mut resp).unwrap();
+    ctx.conn.send.send_message_write_all(&resp).unwrap();
 }
