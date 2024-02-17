@@ -135,7 +135,10 @@ impl<D: 'static> Object<D> {
             children: HashMap::new(),
         };
 
-        // TODO: add Get and PropertiesChanged
+        let get_method = MethodImp::new("Get", get_prop_cb)
+            .add_arg::<String>("interface_name", false)
+            .add_arg::<String>("property_name", false)
+            .add_arg::<Variant>("value", true);
         let get_all_method = MethodImp::new("GetAll", get_all_props_cb)
             .add_arg::<String>("interface_name", false)
             .add_arg::<HashMap<String, Variant>>("props", true);
@@ -148,6 +151,7 @@ impl<D: 'static> Object<D> {
             .add_arg::<HashMap<String, Variant>>("changed_properties")
             .add_arg::<&[String]>("invalidated_properties");
         let props_iface = InterfaceImp::new("org.freedesktop.DBus.Properties")
+            .add_method(get_method)
             .add_method(get_all_method)
             .add_method(set_method)
             .add_signal(props_changed_signal);
@@ -319,6 +323,36 @@ pub enum Access<R, W> {
     ReadWrite(R, W),
 }
 
+fn get_prop_cb<D: 'static>(ctx: MethodContext<D>) {
+    let object = ctx.service.get_object(ctx.object_path).unwrap();
+    let mut parser = ctx.msg.body.parser();
+    let iface_name = parser.get::<&str>().unwrap();
+    let prop_name = parser.get::<&str>().unwrap();
+    let iface = object.interfaces.get(iface_name).unwrap();
+    let prop = iface.props.get(prop_name).unwrap();
+
+    let pctx = PropContext {
+        conn: ctx.conn,
+        state: ctx.state,
+        object_path: ctx.object_path,
+        name: &prop.name,
+    };
+
+    match &prop.access {
+        Access::Write(_) => todo!(),
+        Access::Read(get) | Access::ReadWrite(get, _) => {
+            let val = get(pctx);
+            let val = Variant {
+                sig: val.sig(),
+                value: val,
+            };
+            let mut resp = ctx.msg.dynheader.make_response();
+            resp.body.push_param(val).unwrap();
+            ctx.conn.send.send_message_write_all(&resp).unwrap();
+        }
+    }
+}
+
 fn get_all_props_cb<D: 'static>(ctx: MethodContext<D>) {
     let object = ctx.service.get_object(ctx.object_path).unwrap();
     let iface_name = ctx.msg.body.parser().get::<&str>().unwrap();
@@ -335,9 +369,8 @@ fn get_all_props_cb<D: 'static>(ctx: MethodContext<D>) {
         };
 
         match &prop.access {
-            Access::Read(_) => todo!(),
-            Access::Write(_) => todo!(),
-            Access::ReadWrite(get, _) => {
+            Access::Write(_) => (),
+            Access::Read(get) | Access::ReadWrite(get, _) => {
                 let val = get(ctx);
                 props.insert(
                     &prop.name,
