@@ -1,0 +1,9 @@
+[package]
+name = "rustbus-service"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["MaxVerevkin <maxxverrr@gmail.com>"]
+
+[dependencies]
+rustbus = "0.19"
