@@ -1,10 +1,18 @@
-[package]
-name = "rustbus-service"
-version = "0.1.0"
+[workspace]
+members = [".", "rustbus-service-macros"]
+[workspace.package]
 edition = "2021"
 license = "MIT"
 authors = ["MaxVerevkin <maxxverrr@gmail.com>"]
 
+[package]
+name = "rustbus-service"
+version = "0.1.0"
+edition = { workspace = true }
+license = { workspace = true }
+authors = { workspace = true }
+
 [dependencies]
 # rustbus = "0.19"
 rustbus = { git = "https://github.com/MaxVerevkin/rustbus", branch = "patches" }
+rustbus-service-macros = { version = "0.1.0", path = "./rustbus-service-macros" }

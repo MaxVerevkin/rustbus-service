@@ -12,6 +12,7 @@ use rustbus::wire::unmarshal::traits::Variant as UnVariant;
 use rustbus::{DuplexConn, MessageType, Signature};
 
 pub use rustbus;
+pub use rustbus_service_macros::Args;
 
 /// A helper for building DBus services.
 ///
@@ -342,35 +343,10 @@ pub enum Access<R, W> {
     ReadWrite(R, W),
 }
 
+#[derive(Args)]
 struct GetPropArgs<'a> {
     iface_name: &'a str,
     prop_name: &'a str,
-}
-
-impl Args for GetPropArgs<'_> {
-    type Ty<'a> = GetPropArgs<'a>;
-
-    fn parse(
-        mut parser: MessageBodyParser,
-    ) -> Result<Self::Ty<'_>, rustbus::wire::errors::UnmarshalError> {
-        Ok(GetPropArgs {
-            iface_name: parser.get()?,
-            prop_name: parser.get()?,
-        })
-    }
-
-    fn introspect(buf: &mut Vec<MethodArgument>) {
-        buf.push(MethodArgument {
-            name: "interface_name",
-            is_out: false,
-            signature: <&str as Signature>::signature(),
-        });
-        buf.push(MethodArgument {
-            name: "property_name",
-            is_out: false,
-            signature: <&str as Signature>::signature(),
-        });
-    }
 }
 
 fn get_prop_cb<D: 'static>(ctx: MethodContext<D>, args: GetPropArgs) {
@@ -400,28 +376,9 @@ fn get_prop_cb<D: 'static>(ctx: MethodContext<D>, args: GetPropArgs) {
     }
 }
 
+#[derive(Args)]
 struct GetAllPropsArgs<'a> {
     iface_name: &'a str,
-}
-
-impl Args for GetAllPropsArgs<'_> {
-    type Ty<'a> = GetAllPropsArgs<'a>;
-
-    fn parse(
-        mut parser: MessageBodyParser,
-    ) -> Result<Self::Ty<'_>, rustbus::wire::errors::UnmarshalError> {
-        Ok(GetAllPropsArgs {
-            iface_name: parser.get()?,
-        })
-    }
-
-    fn introspect(buf: &mut Vec<MethodArgument>) {
-        buf.push(MethodArgument {
-            name: "interface_name",
-            is_out: false,
-            signature: <&str as Signature>::signature(),
-        });
-    }
 }
 
 fn get_all_props_cb<D: 'static>(ctx: MethodContext<D>, args: GetAllPropsArgs) {
@@ -458,42 +415,11 @@ fn get_all_props_cb<D: 'static>(ctx: MethodContext<D>, args: GetAllPropsArgs) {
     ctx.conn.send.send_message_write_all(&resp).unwrap();
 }
 
+#[derive(Args)]
 struct SetPropArgs<'a> {
     iface_name: &'a str,
     prop_name: &'a str,
     value: UnVariant<'a, 'a>,
-}
-
-impl Args for SetPropArgs<'_> {
-    type Ty<'a> = SetPropArgs<'a>;
-
-    fn parse(
-        mut parser: MessageBodyParser,
-    ) -> Result<Self::Ty<'_>, rustbus::wire::errors::UnmarshalError> {
-        Ok(SetPropArgs {
-            iface_name: parser.get()?,
-            prop_name: parser.get()?,
-            value: parser.get()?,
-        })
-    }
-
-    fn introspect(buf: &mut Vec<MethodArgument>) {
-        buf.push(MethodArgument {
-            name: "interface_name",
-            is_out: false,
-            signature: <&str as Signature>::signature(),
-        });
-        buf.push(MethodArgument {
-            name: "property_name",
-            is_out: false,
-            signature: <&str as Signature>::signature(),
-        });
-        buf.push(MethodArgument {
-            name: "value",
-            is_out: false,
-            signature: <UnVariant as Signature>::signature(),
-        });
-    }
 }
 
 fn set_prop_cb<D: 'static>(ctx: MethodContext<D>, args: SetPropArgs) {
