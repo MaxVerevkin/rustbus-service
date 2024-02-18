@@ -2,7 +2,7 @@
 
 #![allow(clippy::new_without_default)]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
 
 use rustbus::connection::Timeout;
@@ -20,6 +20,7 @@ pub use rustbus_service_macros::Args;
 /// of `org.freedesktop.DBus.Introspectable` and `org.freedesktop.DBus.Properties` interfaces.
 pub struct Service<D> {
     root: Object<D>,
+    queue: VecDeque<MarshalledMessage>,
 }
 
 pub struct MethodContext<'a, D> {
@@ -42,6 +43,7 @@ impl<D: 'static> Service<D> {
     pub fn new() -> Self {
         Self {
             root: Object::new(),
+            queue: VecDeque::new(),
         }
     }
 
@@ -65,6 +67,31 @@ impl<D: 'static> Service<D> {
         self.root.get_child_mut(path.strip_prefix('/')?)
     }
 
+    /// Get a reply message with a given serial and queue all the other messages.
+    pub fn get_reply(
+        &mut self,
+        conn: &mut DuplexConn,
+        serial: u32,
+        timeout: Timeout,
+    ) -> Result<MarshalledMessage, rustbus::connection::Error> {
+        assert!(matches!(timeout, Timeout::Infinite), "unimplemented");
+        if let Some(i) = self
+            .queue
+            .iter()
+            .position(|x| x.dynheader.response_serial == Some(serial))
+        {
+            Ok(self.queue.remove(i).unwrap())
+        } else {
+            loop {
+                let msg = conn.recv.get_next_message(Timeout::Infinite)?;
+                if msg.dynheader.response_serial == Some(serial) {
+                    break Ok(msg);
+                }
+                self.queue.push_back(msg);
+            }
+        }
+    }
+
     /// Receive messages and dispatch method calls.
     pub fn run(
         &mut self,
@@ -74,10 +101,13 @@ impl<D: 'static> Service<D> {
     ) -> Result<(), rustbus::connection::Error> {
         assert!(matches!(timeout, Timeout::Nonblock), "unimplemented");
         loop {
-            let msg = match conn.recv.get_next_message(Timeout::Nonblock) {
-                Ok(msg) => msg,
-                Err(rustbus::connection::Error::TimedOut) => return Ok(()),
-                Err(e) => return Err(e),
+            let msg = match self.queue.pop_front() {
+                Some(msg) => msg,
+                None => match conn.recv.get_next_message(Timeout::Nonblock) {
+                    Ok(msg) => msg,
+                    Err(rustbus::connection::Error::TimedOut) => return Ok(()),
+                    Err(e) => return Err(e),
+                },
             };
 
             match msg.typ {
