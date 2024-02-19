@@ -6,13 +6,13 @@ use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
 
 use rustbus::connection::Timeout;
-use rustbus::message_builder::{MarshalledMessage, MessageBodyParser};
+use rustbus::message_builder::{MarshalledMessage, MarshalledMessageBody, MessageBodyParser};
 use rustbus::params::{Param, Variant};
 use rustbus::wire::unmarshal::traits::Variant as UnVariant;
 use rustbus::{DuplexConn, MessageType, Signature};
 
 pub use rustbus;
-pub use rustbus_service_macros::Args;
+pub use rustbus_service_macros::{Args, ReturnArgs};
 
 /// A helper for building DBus services.
 ///
@@ -144,19 +144,38 @@ pub trait Args: Sized {
     fn introspect(buf: &mut Vec<MethodArgument>);
 }
 
+pub trait ReturnArgs: Sized {
+    type Ty<'a>;
+    fn push(
+        val: Self::Ty<'_>,
+        msg: &mut MarshalledMessageBody,
+    ) -> Result<(), rustbus::wire::errors::MarshalError>;
+    fn introspect(buf: &mut Vec<MethodArgument>);
+}
+
 impl Args for () {
     type Ty<'a> = ();
-
     fn parse(_: MessageBodyParser) -> Result<Self::Ty<'_>, rustbus::wire::errors::UnmarshalError> {
         Ok(())
     }
+    fn introspect(_buf: &mut Vec<MethodArgument>) {}
+}
 
+impl ReturnArgs for () {
+    type Ty<'a> = ();
+    fn push(
+        _val: Self::Ty<'_>,
+        _msg: &mut MarshalledMessageBody,
+    ) -> Result<(), rustbus::wire::errors::MarshalError> {
+        Ok(())
+    }
     fn introspect(_buf: &mut Vec<MethodArgument>) {}
 }
 
 type MethodCallCb<D> = Rc<dyn Fn(MethodContext<D>)>;
 type PropGetCb<D> = Box<dyn Fn(PropContext<D>) -> Param<'static, 'static>>;
 type PropSetCb<D> = Box<dyn Fn(PropContext<D>, UnVariant)>;
+type ArgsIntrospect = Box<dyn Fn(&mut Vec<MethodArgument>)>;
 
 fn get_call_handler<D: 'static>(
     root: &Object<D>,
@@ -184,26 +203,23 @@ impl<D: 'static> Object<D> {
             children: HashMap::new(),
         };
 
-        let get_method =
-            MethodImp::new::<GetPropArgs, _>("Get", get_prop_cb).add_return_arg::<Variant>("value");
-        let get_all_method = MethodImp::new::<GetAllPropsArgs, _>("GetAll", get_all_props_cb)
-            .add_return_arg::<HashMap<String, Variant>>("props");
-        let set_method = MethodImp::new::<SetPropArgs, _>("Set", set_prop_cb);
-        let props_changed_signal = SignalImp::new("PropertiesChanged")
-            .add_arg::<String>("interface_name")
-            .add_arg::<HashMap<String, Variant>>("changed_properties")
-            .add_arg::<&[String]>("invalidated_properties");
+        #[derive(ReturnArgs)]
+        struct PropsChangedSignal<'a> {
+            interface_name: &'a str,
+            changed_properties: HashMap<&'a str, Variant<'a, 'a>>,
+            invalidated_properties: &'a [String],
+        }
+
         let props_iface = InterfaceImp::new("org.freedesktop.DBus.Properties")
-            .add_method(get_method)
-            .add_method(get_all_method)
-            .add_method(set_method)
-            .add_signal(props_changed_signal);
+            .with_method::<GetPropArgs, GetPropReturnArgs>("Get", get_prop_cb)
+            .with_method::<GetAllPropsArgs, GetAllPropsReturnArgs>("GetAll", get_all_props_cb)
+            .with_method::<SetPropArgs, ()>("Set", set_prop_cb)
+            .with_signal::<PropsChangedSignal>("PropertiesChanged");
         object.add_interface(props_iface);
 
-        let introspect_method = MethodImp::new::<(), _>("Introspect", introspect_cb)
-            .add_return_arg::<String>("xml_data");
         let introspectable_iface =
-            InterfaceImp::new("org.freedesktop.DBus.Introspectable").add_method(introspect_method);
+            InterfaceImp::new("org.freedesktop.DBus.Introspectable")
+                .with_method::<(), IntrospectReturnArgs>("Introspect", introspect_cb);
         object.add_interface(introspectable_iface);
 
         object
@@ -242,8 +258,8 @@ impl<D: 'static> Object<D> {
 pub struct InterfaceImp<D> {
     name: Box<str>,
     methods: HashMap<Box<str>, MethodImp<D>>,
-    signals: HashMap<Box<str>, SignalImp>,
     props: HashMap<Box<str>, PropertyImp<D>>,
+    signals: Vec<SignalImp>,
 }
 
 impl<D> InterfaceImp<D> {
@@ -251,22 +267,42 @@ impl<D> InterfaceImp<D> {
         Self {
             name: interface.into(),
             methods: HashMap::new(),
-            signals: HashMap::new(),
             props: HashMap::new(),
+            signals: Vec::new(),
         }
     }
 
-    pub fn add_method(mut self, method: MethodImp<D>) -> Self {
-        self.methods.insert(method.name.clone(), method);
+    pub fn with_method<A, Ra>(
+        mut self,
+        name: impl Into<Box<str>>,
+        handler: impl for<'a, 'b> Fn(&'b mut MethodContext<'a, D>, A::Ty<'a>) -> Ra::Ty<'b> + 'static,
+    ) -> Self
+    where
+        A: Args,
+        Ra: ReturnArgs,
+    {
+        let name = name.into();
+        self.methods.insert(
+            name.clone(),
+            MethodImp {
+                name,
+                handler: Rc::new(move |mut ctx| {
+                    let mut resp = ctx.msg.dynheader.make_response();
+                    let a = A::parse(ctx.msg.body.parser()).unwrap();
+                    let ret_args = handler(&mut ctx, a);
+                    Ra::push(ret_args, &mut resp.body).unwrap();
+                    ctx.conn.send.send_message_write_all(&resp).unwrap();
+                }),
+                introspect: Box::new(|x| {
+                    A::introspect(x);
+                    Ra::introspect(x);
+                }),
+            },
+        );
         self
     }
 
-    pub fn add_signal(mut self, signal: SignalImp) -> Self {
-        self.signals.insert(signal.name.clone(), signal);
-        self
-    }
-
-    pub fn add_prop<T, R, W>(mut self, name: impl Into<Box<str>>, access: Access<R, W>) -> Self
+    pub fn with_prop<T, R, W>(mut self, name: impl Into<Box<str>>, access: Access<R, W>) -> Self
     where
         T: Signature + Into<Param<'static, 'static>>,
         R: Fn(PropContext<D>) -> T + 'static,
@@ -289,76 +325,32 @@ impl<D> InterfaceImp<D> {
         );
         self
     }
-}
 
-pub struct MethodImp<D> {
-    name: Box<str>,
-    handler: MethodCallCb<D>,
-    #[allow(clippy::type_complexity)]
-    introspect: Box<dyn Fn(&mut Vec<MethodArgument>)>,
-    return_args: Vec<MethodArgument>,
-}
-
-impl<D> MethodImp<D> {
-    pub fn new<A, F>(name: impl Into<Box<str>>, handler: F) -> Self
-    where
-        A: Args,
-        F: for<'a, 'b> Fn(MethodContext<'a, D>, A::Ty<'b>) + 'static,
-    {
+    pub fn with_signal<Ra: ReturnArgs>(mut self, name: impl Into<Box<str>>) -> Self {
         let name = name.into();
-        MethodImp {
+        self.signals.push(SignalImp {
             name,
-            handler: Rc::new(move |ctx| {
-                let a = A::parse(ctx.msg.body.parser()).unwrap();
-                handler(ctx, a);
-            }),
-            introspect: Box::new(|x| A::introspect(x)),
-            return_args: Vec::new(),
-        }
-    }
-
-    pub fn add_return_arg<T: Signature>(mut self, name: &'static str) -> Self {
-        self.return_args.push(MethodArgument {
-            name,
-            is_out: true,
-            signature: T::signature(),
+            introspect: Box::new(|x| Ra::introspect(x)),
         });
         self
     }
+}
+
+struct MethodImp<D> {
+    name: Box<str>,
+    handler: MethodCallCb<D>,
+    introspect: ArgsIntrospect,
+}
+
+struct SignalImp {
+    name: Box<str>,
+    introspect: ArgsIntrospect,
 }
 
 pub struct MethodArgument {
     pub name: &'static str,
     pub is_out: bool,
     pub signature: rustbus::signature::Type,
-}
-
-pub struct SignalImp {
-    name: Box<str>,
-    args: Vec<SignalArgument>,
-}
-
-impl SignalImp {
-    pub fn new(name: impl Into<Box<str>>) -> Self {
-        let name = name.into();
-        SignalImp {
-            name,
-            args: Vec::new(),
-        }
-    }
-
-    pub fn add_arg<T: Signature>(mut self, name: impl Into<Box<str>>) -> Self {
-        self.args.push(SignalArgument {
-            name: name.into(),
-            signature: T::signature(),
-        });
-        self
-    }
-}
-
-struct SignalArgument {
-    name: Box<str>,
-    signature: rustbus::signature::Type,
 }
 
 pub struct PropertyImp<D> {
@@ -379,7 +371,15 @@ struct GetPropArgs<'a> {
     prop_name: &'a str,
 }
 
-fn get_prop_cb<D: 'static>(ctx: MethodContext<D>, args: GetPropArgs) {
+#[derive(ReturnArgs)]
+struct GetPropReturnArgs<'a> {
+    value: Variant<'a, 'a>,
+}
+
+fn get_prop_cb<'a, D: 'static>(
+    ctx: &'a mut MethodContext<D>,
+    args: GetPropArgs,
+) -> GetPropReturnArgs<'a> {
     let object = ctx.service.get_object(ctx.object_path).unwrap();
     let iface = object.interfaces.get(args.iface_name).unwrap();
     let prop = iface.props.get(args.prop_name).unwrap();
@@ -395,13 +395,12 @@ fn get_prop_cb<D: 'static>(ctx: MethodContext<D>, args: GetPropArgs) {
         Access::Write(_) => todo!(),
         Access::Read(get) | Access::ReadWrite(get, _) => {
             let val = get(pctx);
-            let val = Variant {
-                sig: val.sig(),
-                value: val,
-            };
-            let mut resp = ctx.msg.dynheader.make_response();
-            resp.body.push_param(val).unwrap();
-            ctx.conn.send.send_message_write_all(&resp).unwrap();
+            GetPropReturnArgs {
+                value: Variant {
+                    sig: val.sig(),
+                    value: val,
+                },
+            }
         }
     }
 }
@@ -411,7 +410,15 @@ struct GetAllPropsArgs<'a> {
     iface_name: &'a str,
 }
 
-fn get_all_props_cb<D: 'static>(ctx: MethodContext<D>, args: GetAllPropsArgs) {
+#[derive(ReturnArgs)]
+struct GetAllPropsReturnArgs<'a> {
+    props: HashMap<&'a str, Variant<'a, 'a>>,
+}
+
+fn get_all_props_cb<'a, D: 'static>(
+    ctx: &'a mut MethodContext<D>,
+    args: GetAllPropsArgs,
+) -> GetAllPropsReturnArgs<'a> {
     let object = ctx.service.get_object(ctx.object_path).unwrap();
     let iface = object.interfaces.get(args.iface_name).unwrap();
 
@@ -440,9 +447,7 @@ fn get_all_props_cb<D: 'static>(ctx: MethodContext<D>, args: GetAllPropsArgs) {
         }
     }
 
-    let mut resp = ctx.msg.dynheader.make_response();
-    resp.body.push_param(props).unwrap();
-    ctx.conn.send.send_message_write_all(&resp).unwrap();
+    GetAllPropsReturnArgs { props }
 }
 
 #[derive(Args)]
@@ -452,7 +457,7 @@ struct SetPropArgs<'a> {
     value: UnVariant<'a, 'a>,
 }
 
-fn set_prop_cb<D: 'static>(ctx: MethodContext<D>, args: SetPropArgs) {
+fn set_prop_cb<D: 'static>(ctx: &mut MethodContext<D>, args: SetPropArgs) {
     let object = ctx.service.get_object(ctx.object_path).unwrap();
     let iface = object.interfaces.get(args.iface_name).unwrap();
 
@@ -476,7 +481,12 @@ fn set_prop_cb<D: 'static>(ctx: MethodContext<D>, args: SetPropArgs) {
         .unwrap();
 }
 
-fn introspect_cb<D: 'static>(ctx: MethodContext<D>, _args: ()) {
+#[derive(ReturnArgs)]
+struct IntrospectReturnArgs {
+    xml_data: String,
+}
+
+fn introspect_cb<D: 'static>(ctx: &mut MethodContext<D>, _args: ()) -> IntrospectReturnArgs {
     let object = ctx.service.get_object(ctx.object_path).unwrap();
 
     let mut xml = String::new();
@@ -493,7 +503,7 @@ fn introspect_cb<D: 'static>(ctx: MethodContext<D>, _args: ()) {
             xml.push_str(r#"<method name=""#);
             xml.push_str(&method.name);
             xml.push_str(r#"">"#);
-            for arg in args_buf.iter().chain(&method.return_args) {
+            for arg in &args_buf {
                 xml.push_str(r#"<arg name=""#);
                 xml.push_str(arg.name);
                 xml.push_str(r#"" type=""#);
@@ -504,13 +514,15 @@ fn introspect_cb<D: 'static>(ctx: MethodContext<D>, _args: ()) {
             }
             xml.push_str(r#"</method>"#);
         }
-        for method in iface.signals.values() {
+        for signal in &iface.signals {
+            args_buf.clear();
+            (signal.introspect)(&mut args_buf);
             xml.push_str(r#"<signal name=""#);
-            xml.push_str(&method.name);
+            xml.push_str(&signal.name);
             xml.push_str(r#"">"#);
-            for arg in &method.args {
+            for arg in &args_buf {
                 xml.push_str(r#"<arg name=""#);
-                xml.push_str(&arg.name);
+                xml.push_str(arg.name);
                 xml.push_str(r#"" type=""#);
                 arg.signature.to_str(&mut xml);
                 xml.push_str(r#""/>"#);
@@ -539,14 +551,5 @@ fn introspect_cb<D: 'static>(ctx: MethodContext<D>, _args: ()) {
     }
     xml.push_str("</node>");
 
-    // TODO: signals
-    // <signal name="PropertiesChanged">
-    //   <arg name="interface_name" type="s"/>
-    //   <arg name="changed_properties" type="a{sv}"/>
-    //   <arg name="invalidated_properties" type="as"/>
-    // </signal>
-
-    let mut resp = ctx.msg.dynheader.make_response();
-    resp.body.push_param(&xml).unwrap();
-    ctx.conn.send.send_message_write_all(&resp).unwrap();
+    IntrospectReturnArgs { xml_data: xml }
 }
