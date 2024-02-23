@@ -123,7 +123,7 @@ impl<D: 'static> Service<D> {
                             state,
                             msg: &msg,
                             object_path: msg.dynheader.object.as_deref().unwrap(),
-                        });
+                        })?;
                     } else {
                         let resp = rustbus::standard_messages::unknown_method(&msg.dynheader);
                         conn.send.send_message_write_all(&resp)?;
@@ -172,7 +172,8 @@ impl ReturnArgs for () {
     fn introspect(_buf: &mut Vec<MethodArgument>) {}
 }
 
-type MethodCallCb<D> = Rc<dyn Fn(MethodContext<D>)>;
+type Error = rustbus::connection::Error;
+type MethodCallCb<D> = Rc<dyn Fn(MethodContext<D>) -> Result<(), Error>>;
 type PropGetCb<D> = Box<dyn Fn(PropContext<D>) -> Param<'static, 'static>>;
 type PropSetCb<D> = Box<dyn Fn(PropContext<D>, UnVariant)>;
 type ArgsIntrospect = Box<dyn Fn(&mut Vec<MethodArgument>)>;
@@ -283,15 +284,20 @@ impl<D> InterfaceImp<D> {
     {
         let name = name.into();
         self.methods.insert(
-            name.clone(),
+            name,
             MethodImp {
-                name,
                 handler: Rc::new(move |mut ctx| {
+                    let Ok(args) = A::parse(ctx.msg.body.parser()) else {
+                        let resp =
+                            rustbus::standard_messages::invalid_args(&ctx.msg.dynheader, None);
+                        ctx.conn.send.send_message_write_all(&resp)?;
+                        return Ok(());
+                    };
                     let mut resp = ctx.msg.dynheader.make_response();
-                    let a = A::parse(ctx.msg.body.parser()).unwrap();
-                    let ret_args = handler(&mut ctx, a);
-                    Ra::push(ret_args, &mut resp.body).unwrap();
-                    ctx.conn.send.send_message_write_all(&resp).unwrap();
+                    let ret_args = handler(&mut ctx, args);
+                    Ra::push(ret_args, &mut resp.body)?;
+                    ctx.conn.send.send_message_write_all(&resp)?;
+                    Ok(())
                 }),
                 introspect: Box::new(|x| {
                     A::introspect(x);
@@ -337,7 +343,6 @@ impl<D> InterfaceImp<D> {
 }
 
 struct MethodImp<D> {
-    name: Box<str>,
     handler: MethodCallCb<D>,
     introspect: ArgsIntrospect,
 }
@@ -497,11 +502,11 @@ fn introspect_cb<D: 'static>(ctx: &mut MethodContext<D>, _args: ()) -> Introspec
         xml.push_str(r#"<interface name=""#);
         xml.push_str(&iface.name);
         xml.push_str(r#"">"#);
-        for method in iface.methods.values() {
+        for (method_name, method) in &iface.methods {
             args_buf.clear();
             (method.introspect)(&mut args_buf);
             xml.push_str(r#"<method name=""#);
-            xml.push_str(&method.name);
+            xml.push_str(method_name);
             xml.push_str(r#"">"#);
             for arg in &args_buf {
                 xml.push_str(r#"<arg name=""#);
