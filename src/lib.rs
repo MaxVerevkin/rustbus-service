@@ -481,11 +481,6 @@ fn set_prop_cb<D: 'static>(ctx: &mut MethodContext<D>, args: SetPropArgs) {
         Access::Read(_) => todo!(),
         Access::Write(set) | Access::ReadWrite(_, set) => set(pctx, args.value),
     }
-
-    ctx.conn
-        .send
-        .send_message_write_all(&ctx.msg.dynheader.make_response())
-        .unwrap();
 }
 
 #[derive(ReturnArgs)]
