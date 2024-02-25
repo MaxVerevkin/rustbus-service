@@ -176,7 +176,7 @@ type Error = rustbus::connection::Error;
 type MethodCallCb<D> = Rc<dyn Fn(MethodContext<D>) -> Result<(), Error>>;
 type PropGetCb<D> = Box<dyn Fn(PropContext<D>) -> Param<'static, 'static>>;
 type PropSetCb<D> = Box<dyn Fn(PropContext<D>, UnVariant)>;
-type ArgsIntrospect = Box<dyn Fn(&mut Vec<MethodArgument>)>;
+type ArgsIntrospect = fn(&mut Vec<MethodArgument>);
 
 fn get_call_handler<D: 'static>(
     root: &Object<D>,
@@ -282,9 +282,8 @@ impl<D> InterfaceImp<D> {
         A: Args,
         Ra: ReturnArgs,
     {
-        let name = name.into();
         self.methods.insert(
-            name,
+            name.into(),
             MethodImp {
                 handler: Rc::new(move |mut ctx| {
                     let Ok(args) = A::parse(ctx.msg.body.parser()) else {
@@ -299,10 +298,10 @@ impl<D> InterfaceImp<D> {
                     ctx.conn.send.send_message_write_all(&resp)?;
                     Ok(())
                 }),
-                introspect: Box::new(|x| {
+                introspect: |x| {
                     A::introspect(x);
                     Ra::introspect(x);
-                }),
+                },
             },
         );
         self
@@ -314,11 +313,9 @@ impl<D> InterfaceImp<D> {
         R: Fn(PropContext<D>) -> T + 'static,
         W: Fn(PropContext<D>, UnVariant) + 'static,
     {
-        let name = name.into();
         self.props.insert(
-            name.clone(),
+            name.into(),
             PropertyImp {
-                name,
                 signature: T::signature(),
                 access: match access {
                     Access::Read(r) => Access::Read(Box::new(move |ctx| r(ctx).into())),
@@ -336,7 +333,7 @@ impl<D> InterfaceImp<D> {
         let name = name.into();
         self.signals.push(SignalImp {
             name,
-            introspect: Box::new(|x| Ra::introspect(x)),
+            introspect: |x| Ra::introspect(x),
         });
         self
     }
@@ -359,7 +356,6 @@ pub struct MethodArgument {
 }
 
 pub struct PropertyImp<D> {
-    name: Box<str>,
     signature: rustbus::signature::Type,
     access: Access<PropGetCb<D>, PropSetCb<D>>,
 }
@@ -393,7 +389,7 @@ fn get_prop_cb<'a, D: 'static>(
         conn: ctx.conn,
         state: ctx.state,
         object_path: ctx.object_path,
-        name: &prop.name,
+        name: args.prop_name,
     };
 
     match &prop.access {
@@ -429,12 +425,12 @@ fn get_all_props_cb<'a, D: 'static>(
 
     let mut props = HashMap::<&str, Variant>::new();
 
-    for prop in iface.props.values() {
+    for (prop_name, prop) in &iface.props {
         let ctx = PropContext {
             conn: ctx.conn,
             state: ctx.state,
             object_path: ctx.object_path,
-            name: &prop.name,
+            name: prop_name,
         };
 
         match &prop.access {
@@ -442,7 +438,7 @@ fn get_all_props_cb<'a, D: 'static>(
             Access::Read(get) | Access::ReadWrite(get, _) => {
                 let val = get(ctx);
                 props.insert(
-                    &prop.name,
+                    prop_name,
                     Variant {
                         sig: val.sig(),
                         value: val,
@@ -472,7 +468,7 @@ fn set_prop_cb<D: 'static>(ctx: &mut MethodContext<D>, args: SetPropArgs) {
         conn: ctx.conn,
         state: ctx.state,
         object_path: ctx.object_path,
-        name: &prop.name,
+        name: args.prop_name,
     };
 
     match &prop.access {
@@ -534,9 +530,9 @@ fn introspect_cb<D: 'static>(ctx: &mut MethodContext<D>, _args: ()) -> Introspec
             }
             xml.push_str(r#"</signal>"#);
         }
-        for prop in iface.props.values() {
+        for (prop_name, prop) in &iface.props {
             xml.push_str(r#"<property name=""#);
-            xml.push_str(&prop.name);
+            xml.push_str(prop_name);
             xml.push_str(r#"" type=""#);
             prop.signature.to_str(&mut xml);
             xml.push_str(r#"" access=""#);
