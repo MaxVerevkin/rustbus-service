@@ -256,6 +256,7 @@ impl<D: 'static> Object<D> {
     }
 }
 
+/// A DBus interface implementation.
 pub struct InterfaceImp<D> {
     name: Box<str>,
     methods: HashMap<Box<str>, MethodImp<D>>,
@@ -264,6 +265,7 @@ pub struct InterfaceImp<D> {
 }
 
 impl<D> InterfaceImp<D> {
+    /// Create a new empty interface.
     pub fn new(interface: impl Into<Box<str>>) -> Self {
         Self {
             name: interface.into(),
@@ -273,6 +275,7 @@ impl<D> InterfaceImp<D> {
         }
     }
 
+    /// Add a method.
     pub fn with_method<A, Ra>(
         mut self,
         name: impl Into<Box<str>>,
@@ -307,6 +310,7 @@ impl<D> InterfaceImp<D> {
         self
     }
 
+    /// Add a property.
     pub fn with_prop<T, R, W>(mut self, name: impl Into<Box<str>>, access: Access<R, W>) -> Self
     where
         T: Signature + Into<Param<'static, 'static>>,
@@ -329,6 +333,7 @@ impl<D> InterfaceImp<D> {
         self
     }
 
+    /// Add a signal. Used for introspection only.
     pub fn with_signal<Ra: ReturnArgs>(mut self, name: impl Into<Box<str>>) -> Self {
         let name = name.into();
         self.signals.push(SignalImp {
@@ -349,15 +354,16 @@ struct SignalImp {
     introspect: ArgsIntrospect,
 }
 
+struct PropertyImp<D> {
+    signature: rustbus::signature::Type,
+    access: Access<PropGetCb<D>, PropSetCb<D>>,
+}
+
+/// A method argument for introspection.
 pub struct MethodArgument {
     pub name: &'static str,
     pub is_out: bool,
     pub signature: rustbus::signature::Type,
-}
-
-pub struct PropertyImp<D> {
-    signature: rustbus::signature::Type,
-    access: Access<PropGetCb<D>, PropSetCb<D>>,
 }
 
 pub enum Access<R, W> {
