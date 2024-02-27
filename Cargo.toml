@@ -14,5 +14,5 @@ authors = { workspace = true }
 
 [dependencies]
 # rustbus = "0.19"
-rustbus = { git = "https://github.com/KillingSpark/rustbus", rev = "f5581eb" }
+rustbus = { git = "https://github.com/KillingSpark/rustbus", rev = "bf87291" }
 rustbus-service-macros = { version = "0.1.0", path = "./rustbus-service-macros" }
