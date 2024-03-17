@@ -236,6 +236,13 @@ impl<D: 'static> Object<D> {
         self.children.insert(name.into(), object);
     }
 
+    /// Remove a child from this object.
+    ///
+    /// Returns the removed object, if it exists.
+    pub fn remove_child(&mut self, name: &str) -> Option<Self> {
+        self.children.remove(name)
+    }
+
     fn get_child<'a>(&'a self, rel_path: &'_ str) -> Option<&'a Self> {
         match rel_path.split_once('/') {
             None if rel_path.is_empty() => Some(self),
