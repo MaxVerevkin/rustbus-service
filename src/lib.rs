@@ -114,7 +114,14 @@ impl<D: 'static> Service<D> {
                 MessageType::Signal => {
                     eprintln!("todo: handle signal: {:?}", msg.dynheader.member);
                 }
-                MessageType::Error => todo!(),
+                MessageType::Error => {
+                    let error_name = msg.dynheader.error_name.expect("error without error_name");
+                    let error_message = msg.body.parser().get::<&str>().ok();
+                    eprintln!(
+                        "dbus error: {error_name}: {}",
+                        error_message.unwrap_or("<no message>")
+                    );
+                }
                 MessageType::Call => {
                     if let Some(cb) = get_call_handler(&self.root, &msg) {
                         cb(MethodContext {
