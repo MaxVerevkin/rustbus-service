@@ -23,6 +23,7 @@ pub use rustbus_service_macros::{Args, ReturnArgs};
 pub struct Service<D> {
     root: Object<D>,
     queue: VecDeque<MarshalledMessage>,
+    error_cbs: HashMap<Box<str>, ErrorCb>,
 }
 
 pub struct MethodContext<'a, D> {
@@ -46,6 +47,7 @@ impl<D: 'static> Service<D> {
         Self {
             root: Object::new(),
             queue: VecDeque::new(),
+            error_cbs: HashMap::new(),
         }
     }
 
@@ -117,12 +119,20 @@ impl<D: 'static> Service<D> {
                     eprintln!("todo: handle signal: {:?}", msg.dynheader.member);
                 }
                 MessageType::Error => {
-                    let error_name = msg.dynheader.error_name.expect("error without error_name");
-                    let error_message = msg.body.parser().get::<&str>().ok();
-                    eprintln!(
-                        "dbus error: {error_name}: {}",
-                        error_message.unwrap_or("<no message>")
-                    );
+                    let error_name = msg
+                        .dynheader
+                        .error_name
+                        .as_deref()
+                        .expect("error without error_name");
+                    if let Some(cb) = self.error_cbs.get(error_name) {
+                        cb(&msg);
+                    } else {
+                        let error_message = msg.body.parser().get::<&str>().ok();
+                        eprintln!(
+                            "rustbus-service: unhandeled error {error_name}: {}",
+                            error_message.unwrap_or("<no message>")
+                        );
+                    }
                 }
                 MessageType::Call => {
                     if let Some(cb) = get_call_handler(&self.root, &msg) {
@@ -142,6 +152,15 @@ impl<D: 'static> Service<D> {
                 MessageType::Invalid => todo!(),
             }
         }
+    }
+
+    /// Set a callback to run when an error message is received.
+    pub fn set_error_cb(
+        &mut self,
+        error_name: impl Into<Box<str>>,
+        cb: impl Fn(&MarshalledMessage) + 'static,
+    ) {
+        self.error_cbs.insert(error_name.into(), Box::new(cb));
     }
 }
 
@@ -182,6 +201,7 @@ impl ReturnArgs for () {
 }
 
 type Error = rustbus::connection::Error;
+type ErrorCb = Box<dyn Fn(&MarshalledMessage)>;
 type MethodCallCb<D> = Rc<dyn Fn(MethodContext<D>) -> Result<(), Error>>;
 type PropGetCb<D> = Box<dyn Fn(PropContext<D>) -> Param<'static, 'static>>;
 type PropSetCb<D> = Box<dyn Fn(PropContext<D>, UnVariant)>;
