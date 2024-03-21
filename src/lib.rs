@@ -6,7 +6,9 @@ use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
 
 use rustbus::connection::Timeout;
-use rustbus::message_builder::{MarshalledMessage, MarshalledMessageBody, MessageBodyParser};
+use rustbus::message_builder::{
+    HeaderFlags, MarshalledMessage, MarshalledMessageBody, MessageBodyParser,
+};
 use rustbus::params::{Param, Variant};
 use rustbus::wire::unmarshal::traits::Variant as UnVariant;
 use rustbus::{DuplexConn, MessageType, Signature};
@@ -131,7 +133,7 @@ impl<D: 'static> Service<D> {
                             msg: &msg,
                             object_path: msg.dynheader.object.as_deref().unwrap(),
                         })?;
-                    } else {
+                    } else if msg.flags & HeaderFlags::NoReplyExpected.into_raw() == 0 {
                         let resp = rustbus::standard_messages::unknown_method(&msg.dynheader);
                         conn.send.send_message_write_all(&resp)?;
                     }
@@ -303,16 +305,21 @@ impl<D> InterfaceImp<D> {
             name.into(),
             MethodImp {
                 handler: Rc::new(move |mut ctx| {
+                    let send_reply = ctx.msg.flags & HeaderFlags::NoReplyExpected.into_raw() == 0;
                     let Ok(args) = A::parse(ctx.msg.body.parser()) else {
-                        let resp =
-                            rustbus::standard_messages::invalid_args(&ctx.msg.dynheader, None);
-                        ctx.conn.send.send_message_write_all(&resp)?;
+                        if send_reply {
+                            let resp =
+                                rustbus::standard_messages::invalid_args(&ctx.msg.dynheader, None);
+                            ctx.conn.send.send_message_write_all(&resp)?;
+                        }
                         return Ok(());
                     };
                     let mut resp = ctx.msg.dynheader.make_response();
                     let ret_args = handler(&mut ctx, args);
-                    Ra::push(ret_args, &mut resp.body)?;
-                    ctx.conn.send.send_message_write_all(&resp)?;
+                    if send_reply {
+                        Ra::push(ret_args, &mut resp.body)?;
+                        ctx.conn.send.send_message_write_all(&resp)?;
+                    }
                     Ok(())
                 }),
                 introspect: |x| {
